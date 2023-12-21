@@ -6,10 +6,13 @@ import lombok.SneakyThrows;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
+import org.apache.commons.io.ByteOrderMark;
+import org.apache.commons.io.input.BOMInputStream;
 import org.hswebframework.reactor.excel.ExcelOption;
 import org.hswebframework.reactor.excel.spi.ExcelReader;
 import reactor.core.publisher.Flux;
 
+import java.io.BufferedInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.Charset;
@@ -29,7 +32,9 @@ public class CsvReader implements ExcelReader {
         String[] charsets = new String[]{"GB18030", "GBK", "GB2312"};
         for (String charset : charsets) {
             try {
-                temp = Charset.forName(charset);
+                if (Charset.isSupported(charset)) {
+                    temp = Charset.forName(charset);
+                }
             } catch (Throwable ignore) {
             }
             if (temp != null) {
@@ -39,15 +44,23 @@ public class CsvReader implements ExcelReader {
         DEFAULT_GB_CHARSET = temp;
     }
 
+    private InputStream transformInputStream(InputStream stream) {
+        if (stream instanceof BufferedInputStream) {
+            return stream;
+        }
+        return new BufferedInputStream(stream);
+    }
+
     @Override
     @SneakyThrows
     public Flux<CsvCell> read(InputStream inputStream, ExcelOption... options) {
 
         return Flux.create(sink -> {
 
+            InputStream buffered = transformInputStream(inputStream);
             try (CSVParser parser = CSVFormat.EXCEL.parse(new InputStreamReader(
-                    inputStream,
-                    detectCharset(inputStream, options)))) {
+                    buffered,
+                    detectCharset(buffered, options)))) {
 
                 int rowIndex = 0;
                 for (CSVRecord record : parser) {
@@ -56,9 +69,9 @@ public class CsvReader implements ExcelReader {
                     }
                     int last = record.size() - 1;
                     for (int i = 0; i < last; i++) {
-                        sink.next(new CsvCell(rowIndex, i, record.get(i), false));
+                        sink.next(new CsvCell(rowIndex, i, getText(record.get(i)), false));
                     }
-                    sink.next(new CsvCell(rowIndex, last, record.get(last), true));
+                    sink.next(new CsvCell(rowIndex, last, getText(record.get(last)), true));
                     rowIndex++;
                 }
                 sink.complete();
@@ -68,23 +81,41 @@ public class CsvReader implements ExcelReader {
         });
     }
 
+    private String getText(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        char first = text.charAt(0);
+        switch (first) {
+            case '\uFEFF':
+            case '\uFFFE':
+                return text.substring(1);
+        }
+
+        return text;
+    }
+
     @SneakyThrows
     protected Charset detectCharset(InputStream inputStream, ExcelOption... options) {
-        for (ExcelOption option : options) {
-            if (option.isWrapFor(CharsetOption.class)) {
-                return option.unwrap(CharsetOption.class).getCharset();
+        try {
+            for (ExcelOption option : options) {
+                if (option.isWrapFor(CharsetOption.class)) {
+                    return option.unwrap(CharsetOption.class).getCharset();
+                }
             }
-        }
-        CharsetDetector detector = new CharsetDetector();
-        detector.setText(inputStream);
+            CharsetDetector detector = new CharsetDetector();
+            detector.setText(inputStream);
 
-        CharsetMatch match = detector.detect();
-        if (match != null) {
-            Charset charset = Charset.forName(match.getName());
-            //识别为了ISO_8859_1 ? 尝试转为GB18030
-            if (!StandardCharsets.UTF_8.equals(charset)) {
-                return DEFAULT_GB_CHARSET;
+            CharsetMatch match = detector.detect();
+            if (match != null) {
+                Charset charset = Charset.forName(match.getName());
+                //识别为了ISO_8859_1 ? 尝试转为GB18030
+                if (!StandardCharsets.UTF_8.equals(charset)) {
+                    return DEFAULT_GB_CHARSET;
+                }
             }
+        } catch (Throwable ignore) {
+
         }
         return StandardCharsets.UTF_8;
     }
